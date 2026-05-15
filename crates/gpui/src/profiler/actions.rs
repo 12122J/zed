@@ -4,15 +4,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use itertools::Itertools;
-
-use crate::action::Action;
+use crate::{ActionRegistry, action::Action};
 
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ActionStatistics {
     runtime_to_beat: Duration,
-    longest_runtimes: heapless::Vec<ActionTiming, 5>,
+    pub longest_runtimes: heapless::Vec<ActionTiming, 5>,
     running: Option<(TypeId, Instant)>,
 }
 
@@ -62,13 +60,12 @@ impl ActionStatistics {
         let runtime = started.duration_since(now);
         if runtime >= self.runtime_to_beat {
             cold_path(); // most actions are not the worst, optimize for that
-            // TODO!(yara) iter_mut then min_by_key *thing = thing
             if let Some(to_replace) = self
                 .longest_runtimes
                 .iter_mut()
-                .position_min_by_key(|action| runtime >= action.runtime())
+                .min_by_key(|action| runtime >= action.runtime())
             {
-                self.longest_runtimes[to_replace] = ActionTiming {
+                *to_replace = ActionTiming {
                     id: action,
                     start: started,
                     end: now,
@@ -92,13 +89,21 @@ impl ActionStatistics {
         }
     }
 
-    pub fn resolve(self, cx: &crate::App) -> ResolvedActionStatistics {
+    pub fn resolve(self, resolver: &crate::ActionResolver) -> ResolvedActionStatistics {
         ResolvedActionStatistics(
             self.longest_runtimes
                 .into_iter()
-                .flat_map(|timing| timing.try_resolve(cx))
+                .flat_map(|timing| timing.try_resolve(&resolver.0))
                 .collect(),
         )
+    }
+
+    pub fn worst_time(&self) -> Duration {
+        self.longest_runtimes
+            .iter()
+            .map(ActionTiming::runtime)
+            .max()
+            .unwrap_or(Duration::ZERO)
     }
 }
 
@@ -118,19 +123,20 @@ impl ResolvedActionStatistics {
 }
 
 #[doc(hidden)]
+/// UNSTABLE only for use in the profiler and zed-reliability
 #[derive(Copy, Clone, Debug)]
-struct ActionTiming {
+pub struct ActionTiming {
     pub id: TypeId,
     pub start: Instant,
     pub end: Instant,
 }
 
 impl ActionTiming {
-    fn runtime(&self) -> Duration {
+    pub fn runtime(&self) -> Duration {
         self.end - self.start
     }
-    fn try_resolve(self, cx: &crate::App) -> Option<ResolvedActionTiming> {
-        match cx.try_resolve_action(self.id) {
+    fn try_resolve(self, actions: &ActionRegistry) -> Option<ResolvedActionTiming> {
+        match actions.try_resolve_action(&self.id) {
             Some(action_name) => Some(ResolvedActionTiming {
                 action_name,
                 start: self.start,
