@@ -64,9 +64,7 @@ use ui::{
 use util::{ResultExt, size::format_file_size, time::duration_alt_display};
 use util::{debug_panic, defer};
 use workspace::PathList;
-use workspace::{
-    CollaboratorId, MultiWorkspace, NewTerminal, Toast, Workspace, notifications::NotificationId,
-};
+use workspace::{CollaboratorId, MultiWorkspace, NewTerminal, Toast, Workspace};
 use zed_actions::agent::{Chat, ToggleModelSelector};
 use zed_actions::assistant::OpenRulesLibrary;
 
