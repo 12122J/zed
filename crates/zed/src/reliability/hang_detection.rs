@@ -24,11 +24,19 @@ gpui::actions!(
 
 pub(crate) fn start(cx: &mut App) {
     let hang_time = if cfg!(debug_assertions) {
-        log::warn!("Debug assertions enabled, only reporting hangs longer then 30s");
-        Duration::from_secs(30)
+        if cfg!(windows) {
+            // yes windows debug builds are horribly slow
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        }
     } else {
         Duration::from_millis(10)
     };
+
+    if cfg!(debug_assertions) {
+        log::warn!("debug build, only reporting hangs longer then {hang_time:?}");
+    }
 
     start_hang_detection(cx, hang_time);
 
@@ -207,7 +215,7 @@ fn report_hanging_background(
                     .map(|task| PerfIssue::Background(task.location)),
             );
             info!(
-                "Background hang detected on worker {}:\n\t{}",
+                "Background hang detected on {}:\n{}",
                 worker.thread_name.as_deref().unwrap_or_else(|| "Unknown"),
                 worker.stats
             );
@@ -225,15 +233,13 @@ fn report_hanging_actions(
     let stats = profiler::collect_action_stats();
 
     if stats
-        .longest_runtimes
-        .iter()
+        .longest_runtimes()
         .filter(|action| !reported.recently(PerfIssue::Action(action.id)))
         .any(|action| action.runtime() > report_longer_then)
     {
         reported.update(
             stats
-                .longest_runtimes
-                .iter()
+                .longest_runtimes()
                 .map(|action| PerfIssue::Action(action.id)),
         );
         let stats = stats.resolve(resolver);

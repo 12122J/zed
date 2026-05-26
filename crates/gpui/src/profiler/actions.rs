@@ -7,15 +7,25 @@ use std::{
 use crate::{ActionRegistry, action::Action};
 
 #[doc(hidden)]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ActionStatistics {
     runtime_to_beat: Duration,
-    pub longest_runtimes: heapless::Vec<ActionTiming, 5>,
+    longest_runtimes: heapless::Vec<ActionTiming, 5>,
     running: Option<(TypeId, Instant)>,
 }
 
-// TODO!(yara) not here but, we should have a running action to inspect during
-// mega lag. The overhead from that is super worth it.
+impl std::fmt::Debug for ActionStatistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionStatistics")
+            .field("runtime_to_beat", &self.runtime_to_beat)
+            .field("longest_runtimes", &self.longest_runtimes)
+            .field(
+                "running",
+                &self.running.map(|(id, started)| (id, started.elapsed())),
+            )
+            .finish()
+    }
+}
 
 impl std::fmt::Display for ResolvedActionStatistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -57,13 +67,15 @@ impl ActionStatistics {
             .take()
             .expect("only called after `update_running_action`");
 
-        let runtime = started.duration_since(now);
+        let runtime = now.duration_since(started);
         if runtime >= self.runtime_to_beat {
             cold_path(); // most actions are not the worst, optimize for that
-            if let Some(to_replace) = self
-                .longest_runtimes
-                .iter_mut()
-                .min_by_key(|action| runtime >= action.runtime())
+
+            if self.longest_runtimes.is_full()
+                && let Some(to_replace) = self
+                    .longest_runtimes
+                    .iter_mut()
+                    .min_by_key(|action| runtime >= action.runtime())
             {
                 *to_replace = ActionTiming {
                     id: action,
@@ -77,7 +89,7 @@ impl ActionStatistics {
                         start: started,
                         end: now,
                     })
-                    .expect("it must be empty or we would have found min_by_pos");
+                    .expect("just checked it is not full");
             };
 
             self.runtime_to_beat = self
@@ -98,12 +110,15 @@ impl ActionStatistics {
         )
     }
 
-    pub fn worst_time(&self) -> Duration {
+    pub fn longest_runtimes(&self) -> impl Iterator<Item = ActionTiming> {
         self.longest_runtimes
             .iter()
-            .map(ActionTiming::runtime)
-            .max()
-            .unwrap_or(Duration::ZERO)
+            .copied()
+            .chain(self.running.into_iter().map(|(id, start)| ActionTiming {
+                id,
+                start,
+                end: Instant::now(),
+            }))
     }
 }
 
@@ -124,11 +139,20 @@ impl ResolvedActionStatistics {
 
 #[doc(hidden)]
 /// UNSTABLE only for use in the profiler and zed-reliability
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct ActionTiming {
     pub id: TypeId,
     pub start: Instant,
     pub end: Instant,
+}
+
+impl core::fmt::Debug for ActionTiming {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionTiming")
+            .field("id", &self.id)
+            .field("runtime", &self.runtime())
+            .finish()
+    }
 }
 
 impl ActionTiming {
