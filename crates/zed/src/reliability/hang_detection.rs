@@ -23,37 +23,42 @@ gpui::actions!(
 );
 
 pub(crate) fn start(cx: &mut App) {
-    if cfg!(debug_assertions) {
-        log::info!("Debug assertions enabled, only reporting hangs longer then 30s");
-        start_hang_detection(cx, Duration::from_secs(30));
+    let hang_time = if cfg!(debug_assertions) {
+        log::warn!("Debug assertions enabled, only reporting hangs longer then 30s");
+        Duration::from_secs(30)
     } else {
-        start_hang_detection(cx, Duration::from_millis(10));
-    }
+        Duration::from_millis(10)
+    };
+
+    start_hang_detection(cx, hang_time);
 
     cx.on_action(move |_: &HangAction, _| {
         log::warn!(
-            "Hanging the foreground for 5 seconds by blocking in an action.
-            Zed will be unresponsive for that time. This should trigger a report in the log"
+            "Hanging the foreground for {hang_time:?} by blocking in an action. \
+            Zed will be unresponsive for that time. This should trigger a report in the log",
         );
-        std::thread::sleep(Duration::from_secs(5));
+        thread::sleep(hang_time + Duration::from_micros(1));
         log::warn!("Hang ended");
     });
     cx.on_action(move |_: &HangBackground, cx| {
-        cx.background_spawn(async {
+        cx.background_spawn(async move {
             log::warn!(
-                "Hanging a background executor for 5 seconds! This should trigger a report in the log"
+                "Hanging one background executor for {hang_time:?}. \
+                This should trigger a report in the log",
             );
-            std::thread::sleep(Duration::from_secs(5));
+            thread::sleep(hang_time + Duration::from_micros(1));
             log::warn!("Hang ended");
-        }).detach();
+        })
+        .detach();
     });
     cx.on_action(move |_: &HangForeground, cx| {
-        cx.spawn(async |_| {
+        cx.spawn(async move |_| {
             log::warn!(
-                "Hanging the foreground executor for 5 seconds to test performance monitoring! \
-            Zed will be unresponsive for that time. This should trigger a report in the log"
+                "Hanging the foreground executor for {hang_time:?} seconds to test \
+                performance monitoring! Zed will be unresponsive for that time. \
+                This should trigger a report in the log"
             );
-            std::thread::sleep(Duration::from_secs(5));
+            thread::sleep(hang_time + Duration::from_micros(1));
             log::warn!("Hang ended");
         })
         .detach();
@@ -90,7 +95,7 @@ fn start_hang_detection(cx: &App, report_longer_then: Duration) {
                     report_longer_then,
                     foreground_thread,
                 );
-                report_hanging_actions(&mut recent, &action_resolver);
+                report_hanging_actions(&mut recent, &action_resolver, report_longer_then);
 
                 if reported_task_hangs
                     && let Some(path) =
@@ -103,7 +108,7 @@ fn start_hang_detection(cx: &App, report_longer_then: Duration) {
         .expect("App can always spawn threads");
 }
 
-#[derive(Hash, Eq, PartialEq)]
+#[derive(Debug, Hash, Eq, PartialEq)]
 enum PerfIssue {
     Foreground(&'static Location<'static>),
     Background(&'static Location<'static>),
@@ -119,15 +124,20 @@ impl RecentlyReported {
     fn recently(&self, issue: PerfIssue) -> bool {
         self.history
             .get(&issue)
-            .is_some_and(|reported_at| reported_at.elapsed() > self.forget_after)
+            .is_some_and(|reported_at| reported_at.elapsed() < self.forget_after)
     }
     fn update(&mut self, new: impl Iterator<Item = PerfIssue>) {
-        let now = Instant::now();
-        self.history.extend(new.map(|issue| (issue, now)));
         let _ = self
             .history
             .extract_if(|_, reported_at| reported_at.elapsed() > self.forget_after)
             .count();
+
+        let now = Instant::now();
+        for issue in new {
+            if !self.history.contains_key(&issue) {
+                self.history.insert(issue, now);
+            }
+        }
     }
     fn new() -> Self {
         Self {
@@ -153,8 +163,8 @@ fn report_hanging_foreground(
         .stats
         .longest_poll_times
         .iter()
-        .filter(|task| reported.recently(PerfIssue::Foreground(task.location)))
-        .any(|task| task.until_yielded() > report_longer_then)
+        .filter(|task| !reported.recently(PerfIssue::Foreground(task.location)))
+        .any(|task| task.poll_duration() > report_longer_then)
     {
         reported.update(
             foreground
@@ -186,8 +196,8 @@ fn report_hanging_background(
             .stats
             .longest_poll_times
             .iter()
-            .filter(|task| reported.recently(PerfIssue::Background(task.location)))
-            .any(|stat| stat.until_yielded() > report_longer_then)
+            .filter(|task| !reported.recently(PerfIssue::Background(task.location)))
+            .any(|stat| stat.poll_duration() > report_longer_then)
         {
             reported.update(
                 worker
@@ -207,24 +217,26 @@ fn report_hanging_background(
     report_made
 }
 
-fn report_hanging_actions(reported: &mut RecentlyReported, resolver: &gpui::ActionResolver) {
-    loop {
-        let stats = profiler::collect_action_stats();
+fn report_hanging_actions(
+    reported: &mut RecentlyReported,
+    resolver: &gpui::ActionResolver,
+    report_longer_then: Duration,
+) {
+    let stats = profiler::collect_action_stats();
 
-        if stats
-            .longest_runtimes
-            .iter()
-            .filter(|action| reported.recently(PerfIssue::Action(action.id)))
-            .any(|action| action.runtime() > Duration::from_millis(600))
-        {
-            reported.update(
-                stats
-                    .longest_runtimes
-                    .iter()
-                    .map(|action| PerfIssue::Action(action.id)),
-            );
-            let stats = stats.resolve(resolver);
-            info!("Action hang detected:\n\t{}", stats);
-        }
+    if stats
+        .longest_runtimes
+        .iter()
+        .filter(|action| !reported.recently(PerfIssue::Action(action.id)))
+        .any(|action| action.runtime() > report_longer_then)
+    {
+        reported.update(
+            stats
+                .longest_runtimes
+                .iter()
+                .map(|action| PerfIssue::Action(action.id)),
+        );
+        let stats = stats.resolve(resolver);
+        info!("Action hang detected:\n\t{}", stats);
     }
 }

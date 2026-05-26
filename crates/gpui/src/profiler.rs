@@ -14,8 +14,8 @@ use std::{
 };
 
 mod actions;
-pub(crate) use actions::{save_action_timing, update_running_action};
 pub use actions::{ActionStatistics, ResolvedActionStatistics, collect_action_stats};
+pub(crate) use actions::{save_action_timing, update_running_action};
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ impl std::fmt::Debug for TaskTiming {
         f.debug_struct("TaskTiming")
             .field("location", &self.location)
             .field("since_spawned", &self.spawned.0.elapsed())
-            .field("last_poll_duration", &self.until_yielded())
+            .field("last_poll_duration", &self.poll_duration())
             .field("total_runtime", &self.since_spawn())
             .finish()
     }
@@ -65,7 +65,7 @@ impl TaskTiming {
         }
     }
 
-    pub fn until_yielded(&self) -> Duration {
+    pub fn poll_duration(&self) -> Duration {
         self.end.0 - self.start
     }
 
@@ -127,6 +127,7 @@ impl ThreadTaskTimings {
 }
 
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct ThreadTaskStatistics {
     pub thread_name: Option<String>,
     pub thread_id: ThreadId,
@@ -134,7 +135,6 @@ pub struct ThreadTaskStatistics {
 }
 
 impl ThreadTaskStatistics {
-    /// Convert global thread timings into their structured format.
     pub fn collect(timings: &[GlobalThreadTimings], include_running: TasksIncluded) -> Vec<Self> {
         timings
             .iter()
@@ -155,18 +155,14 @@ impl ThreadTaskStatistics {
                     }) = timings.running
                 {
                     let end = YieldTime(Instant::now());
-                    stats.add_runtime(TaskTiming {
+                    let timing = TaskTiming {
                         location,
                         spawned,
                         start,
                         end,
-                    });
-                    stats.add_yield_timing(TaskTiming {
-                        location,
-                        spawned,
-                        start,
-                        end,
-                    });
+                    };
+                    stats.add_runtime(timing);
+                    stats.add_yield_timing(timing);
                 }
 
                 Self {
@@ -389,7 +385,7 @@ impl std::fmt::Display for TaskStatistics {
         for timing in self.longest_poll_times {
             f.write_fmt(format_args!(
                 "{:<20} - {}:{}\n",
-                format!("{:?}", timing.until_yielded()),
+                format!("{:?}", timing.poll_duration()),
                 timing.location.file(),
                 timing.location.column()
             ))?;
@@ -418,7 +414,7 @@ impl TaskStatistics {
     }
 
     fn add_yield_timing(&mut self, task: TaskTiming) {
-        let yielded_after = task.until_yielded();
+        let yielded_after = task.poll_duration();
         if yielded_after >= self.poll_time_to_beat {
             cold_path(); // most tasks are not the worst, optimize for that
             let to_replace = self
